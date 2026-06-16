@@ -17,33 +17,32 @@ export function ScrollVideo() {
 
   useEffect(() => {
     let isCancelled = false;
-    let objectUrl = '';
 
     async function prepareFrames() {
       try {
-        const response = await fetch(VIDEO_URL);
-        const blob = await response.blob();
-        if (isCancelled) return;
-
-        objectUrl = URL.createObjectURL(blob);
         const video = document.createElement('video');
         video.muted = true;
         video.playsInline = true;
-        video.preload = 'auto';
-        video.src = objectUrl;
+        video.crossOrigin = 'anonymous';
+        video.src = VIDEO_URL;
+        video.load();
 
         await new Promise<void>((resolve, reject) => {
-          video.onloadedmetadata = () => resolve();
+          video.onloadeddata = () => resolve();
           video.onerror = reject;
         });
 
         if (isCancelled) return;
 
         const duration = video.duration;
-        const frameCount = Math.max(30, Math.min(120, Math.round(duration * 24)));
+        const isMobile = window.innerWidth < 768;
         
-        // Scale to max width 1280
-        const scale = Math.min(1, 1280 / video.videoWidth);
+        // Use fewer frames and lower resolution on mobile to prevent crashes
+        const maxFrames = isMobile ? 60 : 120;
+        const frameCount = Math.max(30, Math.min(maxFrames, Math.round(duration * 24)));
+        
+        const maxWidth = isMobile ? 640 : 1280;
+        const scale = Math.min(1, maxWidth / video.videoWidth);
         const targetWidth = Math.round(video.videoWidth * scale);
         const targetHeight = Math.round(video.videoHeight * scale);
 
@@ -56,18 +55,32 @@ export function ScrollVideo() {
           video.currentTime = time;
           
           await new Promise<void>((resolve) => {
-            video.onseeked = () => resolve();
+            const onSeeked = () => {
+              video.removeEventListener('seeked', onSeeked);
+              resolve();
+            };
+            video.addEventListener('seeked', onSeeked);
           });
 
           if (isCancelled) break;
 
-          const bitmap = await createImageBitmap(video, {
-            resizeWidth: targetWidth,
-            resizeHeight: targetHeight,
-            resizeQuality: 'high'
-          });
-          
-          frames.push(bitmap);
+          try {
+            const bitmap = await createImageBitmap(video, {
+              resizeWidth: targetWidth,
+              resizeHeight: targetHeight,
+              resizeQuality: 'low'
+            });
+            frames.push(bitmap);
+          } catch (e) {
+            // Safari fallback if createImageBitmap from video fails
+            const canvas = document.createElement('canvas');
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
+            const ctx = canvas.getContext('2d');
+            ctx?.drawImage(video, 0, 0, targetWidth, targetHeight);
+            const bitmap = await createImageBitmap(canvas);
+            frames.push(bitmap);
+          }
         }
 
         if (!isCancelled) {
@@ -85,7 +98,6 @@ export function ScrollVideo() {
 
     return () => {
       isCancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
       framesRef.current.forEach(f => f.close());
       framesRef.current = [];
     };

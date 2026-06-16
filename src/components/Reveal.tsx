@@ -16,7 +16,7 @@ export function Reveal({ children, delay = 0, className = '', as = 'div' }: Reve
       ([entry]) => {
         setIsVisible(entry.isIntersecting);
       },
-      { threshold: 0.15 }
+      { threshold: 0.05, rootMargin: '0px 0px 50px 0px' }
     );
 
     if (ref.current) {
