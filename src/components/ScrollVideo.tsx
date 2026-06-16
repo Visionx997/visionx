@@ -5,22 +5,30 @@ const VIDEO_URL = 'https://d8j0ntlcm91z4.cloudfront.net/user_38xzZboKViGWJOttwIX
 export function ScrollVideo() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  
+  const [isMobile, setIsMobile] = useState(false);
   const [framesReady, setFramesReady] = useState(false);
+  const [videoReady, setVideoReady] = useState(false);
   
   const framesRef = useRef<ImageBitmap[]>([]);
   const progressRef = useRef({ target: 0, smoothed: 0 });
   const currentFrameIndexRef = useRef(-1);
   const rafIdRef = useRef<number>(0);
-  
   const isSeekingRef = useRef(false);
 
   useEffect(() => {
+    // Detect mobile by checking innerWidth
+    const mobile = window.innerWidth < 768;
+    setIsMobile(mobile);
+
+    // Skip heavy Canvas extraction entirely on mobile devices
+    if (mobile) return;
+
     let isCancelled = false;
     let objectUrl = '';
 
     async function prepareFrames() {
       try {
-        // Fetch as blob to bypass iOS CORS / canvas tainting issues
         const response = await fetch(VIDEO_URL);
         const blob = await response.blob();
         if (isCancelled) return;
@@ -29,7 +37,6 @@ export function ScrollVideo() {
         const video = document.createElement('video');
         video.muted = true;
         video.playsInline = true;
-        video.autoplay = true; // Required by iOS to load data sometimes
         video.src = objectUrl;
         video.load();
 
@@ -40,26 +47,16 @@ export function ScrollVideo() {
 
         if (isCancelled) return;
 
-        const duration = video.duration || 5; // fallback duration if NaN
-        const isMobile = window.innerWidth < 768;
-        
-        // Aggressive scaling for mobile memory limits
-        const maxFrames = isMobile ? 45 : 120;
-        const frameCount = Math.max(20, Math.min(maxFrames, Math.round(duration * 24)));
-        
-        const maxWidth = isMobile ? 480 : 1280;
-        const scale = Math.min(1, maxWidth / video.videoWidth);
+        const duration = video.duration || 5;
+        const frameCount = Math.max(30, Math.min(120, Math.round(duration * 24)));
+        const scale = Math.min(1, 1280 / video.videoWidth);
         const targetWidth = Math.round(video.videoWidth * scale);
         const targetHeight = Math.round(video.videoHeight * scale);
 
         const frames: ImageBitmap[] = [];
 
-        // Pause video so it doesn't play while extracting
-        video.pause();
-
         for (let i = 0; i < frameCount; i++) {
           if (isCancelled) break;
-          
           const time = (i / (frameCount - 1)) * (duration - 0.05);
           video.currentTime = time;
           
@@ -77,11 +74,10 @@ export function ScrollVideo() {
             const bitmap = await createImageBitmap(video, {
               resizeWidth: targetWidth,
               resizeHeight: targetHeight,
-              resizeQuality: 'low'
+              resizeQuality: 'high'
             });
             frames.push(bitmap);
           } catch (e) {
-            // Safari fallback
             const canvas = document.createElement('canvas');
             canvas.width = targetWidth;
             canvas.height = targetHeight;
@@ -122,7 +118,6 @@ export function ScrollVideo() {
 
     window.addEventListener('scroll', handleScroll, { passive: true });
     handleScroll();
-
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
@@ -131,18 +126,20 @@ export function ScrollVideo() {
       const { target, smoothed } = progressRef.current;
       progressRef.current.smoothed += (target - smoothed) * 0.1;
 
-      if (!framesReady) {
-        // Fallback video scrubbing
+      // Use video element scrubbing on mobile or as a fallback on desktop
+      if (isMobile || !framesReady) {
         const video = videoRef.current;
-        if (video && !Number.isNaN(video.duration) && !isSeekingRef.current) {
+        // MUST check readyState >= 2 (HAVE_CURRENT_DATA) to avoid iOS freezing
+        if (video && video.readyState >= 2 && !Number.isNaN(video.duration) && !isSeekingRef.current) {
           const targetTime = progressRef.current.smoothed * video.duration;
+          
           if (Math.abs(video.currentTime - targetTime) > 0.05) {
             isSeekingRef.current = true;
             video.currentTime = targetTime;
           }
         }
       } else {
-        // Canvas frame rendering
+        // Desktop: Canvas Frame Rendering
         const frames = framesRef.current;
         if (frames.length > 0 && canvasRef.current) {
           const frameIndex = Math.min(
@@ -182,38 +179,63 @@ export function ScrollVideo() {
     };
 
     rafIdRef.current = requestAnimationFrame(renderLoop);
-
     return () => cancelAnimationFrame(rafIdRef.current);
-  }, [framesReady]);
+  }, [framesReady, isMobile]);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     
-    const handleSeeked = () => {
-      isSeekingRef.current = false;
-    };
+    const handleSeeked = () => { isSeekingRef.current = false; };
+    const handleCanPlay = () => { setVideoReady(true); };
     
     video.addEventListener('seeked', handleSeeked);
-    return () => video.removeEventListener('seeked', handleSeeked);
+    video.addEventListener('canplay', handleCanPlay);
+    video.addEventListener('loadeddata', handleCanPlay);
+    
+    // On iOS, sometimes the video won't even load its metadata or first frame 
+    // unless we explicitly call load() or play() then immediately pause().
+    // We try to fetch the first frame by attempting to play it.
+    video.load();
+    const playPromise = video.play();
+    if (playPromise !== undefined) {
+      playPromise.then(() => {
+        // Immediately pause so we can scrub it instead
+        video.pause();
+        setVideoReady(true);
+      }).catch(() => {
+        // Autoplay might be blocked, but we've triggered the load
+        setVideoReady(true);
+      });
+    }
+
+    return () => {
+      video.removeEventListener('seeked', handleSeeked);
+      video.removeEventListener('canplay', handleCanPlay);
+      video.removeEventListener('loadeddata', handleCanPlay);
+    };
   }, []);
 
   return (
     <div className="fixed inset-0 -z-10 bg-[#0a0a0a]">
-      {!framesReady && (
+      {/* Show video tag if mobile OR if desktop frames aren't ready yet */}
+      {(isMobile || !framesReady) && (
         <video
           ref={videoRef}
           src={VIDEO_URL}
           muted
           playsInline
           autoPlay
-          className="absolute inset-0 h-full w-full object-cover"
+          preload="auto"
+          className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-1000 ${videoReady ? 'opacity-100' : 'opacity-0'}`}
         />
       )}
-      <canvas
-        ref={canvasRef}
-        className={`absolute inset-0 h-full w-full transition-opacity duration-1000 ${!framesReady ? 'opacity-0' : 'opacity-100'}`}
-      />
+      {!isMobile && (
+        <canvas
+          ref={canvasRef}
+          className={`absolute inset-0 h-full w-full transition-opacity duration-1000 ${!framesReady ? 'opacity-0' : 'opacity-100'}`}
+        />
+      )}
       <div className="absolute inset-0 bg-black/20" />
     </div>
   );
