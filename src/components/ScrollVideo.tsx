@@ -12,19 +12,25 @@ export function ScrollVideo() {
   const currentFrameIndexRef = useRef(-1);
   const rafIdRef = useRef<number>(0);
   
-  // State for fallback video scrubbing
   const isSeekingRef = useRef(false);
 
   useEffect(() => {
     let isCancelled = false;
+    let objectUrl = '';
 
     async function prepareFrames() {
       try {
+        // Fetch as blob to bypass iOS CORS / canvas tainting issues
+        const response = await fetch(VIDEO_URL);
+        const blob = await response.blob();
+        if (isCancelled) return;
+
+        objectUrl = URL.createObjectURL(blob);
         const video = document.createElement('video');
         video.muted = true;
         video.playsInline = true;
-        video.crossOrigin = 'anonymous';
-        video.src = VIDEO_URL;
+        video.autoplay = true; // Required by iOS to load data sometimes
+        video.src = objectUrl;
         video.load();
 
         await new Promise<void>((resolve, reject) => {
@@ -34,19 +40,22 @@ export function ScrollVideo() {
 
         if (isCancelled) return;
 
-        const duration = video.duration;
+        const duration = video.duration || 5; // fallback duration if NaN
         const isMobile = window.innerWidth < 768;
         
-        // Use fewer frames and lower resolution on mobile to prevent crashes
-        const maxFrames = isMobile ? 60 : 120;
-        const frameCount = Math.max(30, Math.min(maxFrames, Math.round(duration * 24)));
+        // Aggressive scaling for mobile memory limits
+        const maxFrames = isMobile ? 45 : 120;
+        const frameCount = Math.max(20, Math.min(maxFrames, Math.round(duration * 24)));
         
-        const maxWidth = isMobile ? 640 : 1280;
+        const maxWidth = isMobile ? 480 : 1280;
         const scale = Math.min(1, maxWidth / video.videoWidth);
         const targetWidth = Math.round(video.videoWidth * scale);
         const targetHeight = Math.round(video.videoHeight * scale);
 
         const frames: ImageBitmap[] = [];
+
+        // Pause video so it doesn't play while extracting
+        video.pause();
 
         for (let i = 0; i < frameCount; i++) {
           if (isCancelled) break;
@@ -72,7 +81,7 @@ export function ScrollVideo() {
             });
             frames.push(bitmap);
           } catch (e) {
-            // Safari fallback if createImageBitmap from video fails
+            // Safari fallback
             const canvas = document.createElement('canvas');
             canvas.width = targetWidth;
             canvas.height = targetHeight;
@@ -98,6 +107,7 @@ export function ScrollVideo() {
 
     return () => {
       isCancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
       framesRef.current.forEach(f => f.close());
       framesRef.current = [];
     };
@@ -111,7 +121,6 @@ export function ScrollVideo() {
     };
 
     window.addEventListener('scroll', handleScroll, { passive: true });
-    // Initialize
     handleScroll();
 
     return () => window.removeEventListener('scroll', handleScroll);
@@ -125,9 +134,9 @@ export function ScrollVideo() {
       if (!framesReady) {
         // Fallback video scrubbing
         const video = videoRef.current;
-        if (video && video.duration && !isSeekingRef.current) {
+        if (video && !Number.isNaN(video.duration) && !isSeekingRef.current) {
           const targetTime = progressRef.current.smoothed * video.duration;
-          if (Math.abs(video.currentTime - targetTime) > 0.001) {
+          if (Math.abs(video.currentTime - targetTime) > 0.05) {
             isSeekingRef.current = true;
             video.currentTime = targetTime;
           }
@@ -174,9 +183,7 @@ export function ScrollVideo() {
 
     rafIdRef.current = requestAnimationFrame(renderLoop);
 
-    return () => {
-      cancelAnimationFrame(rafIdRef.current);
-    };
+    return () => cancelAnimationFrame(rafIdRef.current);
   }, [framesReady]);
 
   useEffect(() => {
@@ -199,12 +206,13 @@ export function ScrollVideo() {
           src={VIDEO_URL}
           muted
           playsInline
+          autoPlay
           className="absolute inset-0 h-full w-full object-cover"
         />
       )}
       <canvas
         ref={canvasRef}
-        className={`absolute inset-0 h-full w-full ${!framesReady ? 'opacity-0' : 'opacity-100'}`}
+        className={`absolute inset-0 h-full w-full transition-opacity duration-1000 ${!framesReady ? 'opacity-0' : 'opacity-100'}`}
       />
       <div className="absolute inset-0 bg-black/20" />
     </div>
