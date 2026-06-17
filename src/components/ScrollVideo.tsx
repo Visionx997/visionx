@@ -6,9 +6,9 @@ export function ScrollVideo() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   
-  const [isMobile, setIsMobile] = useState(false);
   const [framesReady, setFramesReady] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
   
   const framesRef = useRef<ImageBitmap[]>([]);
   const progressRef = useRef({ target: 0, smoothed: 0 });
@@ -16,14 +16,22 @@ export function ScrollVideo() {
   const rafIdRef = useRef<number>(0);
   const isSeekingRef = useRef(false);
 
+  // Resize handling
   useEffect(() => {
-    // Detect mobile by checking innerWidth
-    const mobile = window.innerWidth < 768;
-    setIsMobile(mobile);
+    const handleResize = () => {
+      setIsMobile(window.innerWidth < 768);
+      if (canvasRef.current) {
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        canvasRef.current.width = Math.floor(window.innerWidth * dpr);
+        canvasRef.current.height = Math.floor(window.innerHeight * dpr);
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    handleResize();
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
-    // Skip heavy Canvas extraction entirely on mobile devices
-    if (mobile) return;
-
+  useEffect(() => {
     let isCancelled = false;
     let objectUrl = '';
 
@@ -48,8 +56,15 @@ export function ScrollVideo() {
         if (isCancelled) return;
 
         const duration = video.duration || 5;
-        const frameCount = Math.max(30, Math.min(120, Math.round(duration * 24)));
-        const scale = Math.min(1, 1280 / video.videoWidth);
+        const mobile = window.innerWidth < 768;
+        
+        // Extract 60 frames max on mobile to prevent memory crash, up to 120 on PC
+        const maxFrames = mobile ? 60 : 120;
+        const frameCount = Math.max(30, Math.min(maxFrames, Math.round(duration * 24)));
+        
+        // Lower resolution on mobile to save memory
+        const maxWidth = mobile ? 640 : 1280;
+        const scale = Math.min(1, maxWidth / video.videoWidth);
         const targetWidth = Math.round(video.videoWidth * scale);
         const targetHeight = Math.round(video.videoHeight * scale);
 
@@ -74,7 +89,7 @@ export function ScrollVideo() {
             const bitmap = await createImageBitmap(video, {
               resizeWidth: targetWidth,
               resizeHeight: targetHeight,
-              resizeQuality: 'high'
+              resizeQuality: 'low'
             });
             frames.push(bitmap);
           } catch (e) {
@@ -124,12 +139,12 @@ export function ScrollVideo() {
   useEffect(() => {
     const renderLoop = () => {
       const { target, smoothed } = progressRef.current;
-      progressRef.current.smoothed += (target - smoothed) * 0.1;
+      // Increased smoothing factor from 0.1 to 0.25 to make it feel snappier and less "laggy"
+      progressRef.current.smoothed += (target - smoothed) * 0.25;
 
-      // Use video element scrubbing on mobile or as a fallback on desktop
-      if (isMobile || !framesReady) {
+      if (!framesReady) {
+        // Fallback video scrubbing
         const video = videoRef.current;
-        // MUST check readyState >= 2 (HAVE_CURRENT_DATA) to avoid iOS freezing
         if (video && video.readyState >= 2 && !Number.isNaN(video.duration) && !isSeekingRef.current) {
           const targetTime = progressRef.current.smoothed * video.duration;
           
@@ -139,7 +154,7 @@ export function ScrollVideo() {
           }
         }
       } else {
-        // Desktop: Canvas Frame Rendering
+        // Canvas frame rendering
         const frames = framesRef.current;
         if (frames.length > 0 && canvasRef.current) {
           const frameIndex = Math.min(
@@ -154,21 +169,18 @@ export function ScrollVideo() {
             const frame = frames[frameIndex];
 
             if (ctx && frame) {
-              const dpr = Math.min(2, window.devicePixelRatio || 1);
-              const rect = canvas.getBoundingClientRect();
-              
-              if (canvas.width !== Math.floor(rect.width * dpr) || canvas.height !== Math.floor(rect.height * dpr)) {
-                canvas.width = Math.floor(rect.width * dpr);
-                canvas.height = Math.floor(rect.height * dpr);
-              }
+              const canvasWidth = canvas.width;
+              const canvasHeight = canvas.height;
 
-              const scale = Math.max(canvas.width / frame.width, canvas.height / frame.height);
+              const scale = Math.max(canvasWidth / frame.width, canvasHeight / frame.height);
               const drawWidth = frame.width * scale;
               const drawHeight = frame.height * scale;
-              const offsetX = (canvas.width - drawWidth) / 2;
-              const offsetY = (canvas.height - drawHeight) / 2;
+              const offsetX = (canvasWidth - drawWidth) / 2;
+              const offsetY = (canvasHeight - drawHeight) / 2;
 
-              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+              // Disabling image smoothing can sometimes improve performance
+              ctx.imageSmoothingEnabled = true;
               ctx.drawImage(frame, offsetX, offsetY, drawWidth, drawHeight);
             }
           }
@@ -180,7 +192,7 @@ export function ScrollVideo() {
 
     rafIdRef.current = requestAnimationFrame(renderLoop);
     return () => cancelAnimationFrame(rafIdRef.current);
-  }, [framesReady, isMobile]);
+  }, [framesReady]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -193,18 +205,13 @@ export function ScrollVideo() {
     video.addEventListener('canplay', handleCanPlay);
     video.addEventListener('loadeddata', handleCanPlay);
     
-    // On iOS, sometimes the video won't even load its metadata or first frame 
-    // unless we explicitly call load() or play() then immediately pause().
-    // We try to fetch the first frame by attempting to play it.
     video.load();
     const playPromise = video.play();
     if (playPromise !== undefined) {
       playPromise.then(() => {
-        // Immediately pause so we can scrub it instead
         video.pause();
         setVideoReady(true);
       }).catch(() => {
-        // Autoplay might be blocked, but we've triggered the load
         setVideoReady(true);
       });
     }
@@ -218,8 +225,7 @@ export function ScrollVideo() {
 
   return (
     <div className="fixed inset-0 -z-10 bg-[#0a0a0a]">
-      {/* Show video tag if mobile OR if desktop frames aren't ready yet */}
-      {(isMobile || !framesReady) && (
+      {!framesReady && (
         <video
           ref={videoRef}
           src={VIDEO_URL}
@@ -230,12 +236,10 @@ export function ScrollVideo() {
           className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-1000 ${videoReady ? 'opacity-100' : 'opacity-0'}`}
         />
       )}
-      {!isMobile && (
-        <canvas
-          ref={canvasRef}
-          className={`absolute inset-0 h-full w-full transition-opacity duration-1000 ${!framesReady ? 'opacity-0' : 'opacity-100'}`}
-        />
-      )}
+      <canvas
+        ref={canvasRef}
+        className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-1000 ${!framesReady ? 'opacity-0' : 'opacity-100'}`}
+      />
       <div className="absolute inset-0 bg-black/20" />
     </div>
   );
