@@ -8,7 +8,6 @@ export function ScrollVideo() {
   
   const [framesReady, setFramesReady] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
   
   const framesRef = useRef<ImageBitmap[]>([]);
   const progressRef = useRef({ target: 0, smoothed: 0 });
@@ -19,7 +18,6 @@ export function ScrollVideo() {
   // Resize handling
   useEffect(() => {
     const handleResize = () => {
-      setIsMobile(window.innerWidth < 768);
       if (canvasRef.current) {
         const dpr = Math.min(2, window.devicePixelRatio || 1);
         canvasRef.current.width = Math.floor(window.innerWidth * dpr);
